@@ -29,6 +29,8 @@
 
   .no-scrollbar::-webkit-scrollbar{display:none;}
   .no-scrollbar{-ms-overflow-style:none;scrollbar-width:none;}
+  .cat-scroll, .hero-scroll, .brief-scroll, .podcast-scroll, .grid-scroll, .cd-tabs, .tx-tabs, .eq-tabs, .eq-ranges{cursor:grab;}
+  .hscroll-dragging{cursor:grabbing !important;user-select:none;}
 
   .glass{
     background:rgba(5,5,5,0.8);
@@ -3131,6 +3133,48 @@ renderEQBriefings();
 renderEQAudio();
 renderEQGrid();
 initTXPage();
+
+/* Desktop/mouse support for the horizontal carousels & tab strips.
+   These only had native touch/trackpad scrolling, which doesn't work with
+   a plain mouse on a PC (no touch, no two-finger swipe) — e.g. once the
+   prototype is opened from a GitHub Pages link on a work machine. This adds
+   click-and-drag scrolling plus mouse-wheel-to-horizontal scrolling. */
+function makeHorizontallyScrollable(el){
+  if (!el || el.dataset.hscrollBound) return;
+  el.dataset.hscrollBound = '1';
+  let isDown = false, startX = 0, startScroll = 0, moved = false;
+  el.addEventListener('mousedown', (e)=>{
+    isDown = true;
+    moved = false;
+    el.classList.add('hscroll-dragging');
+    startX = e.pageX;
+    startScroll = el.scrollLeft;
+  });
+  const stopDrag = ()=>{
+    isDown = false;
+    el.classList.remove('hscroll-dragging');
+  };
+  el.addEventListener('mouseleave', stopDrag);
+  el.addEventListener('mouseup', stopDrag);
+  el.addEventListener('mousemove', (e)=>{
+    if (!isDown) return;
+    const dx = e.pageX - startX;
+    if (Math.abs(dx) > 3) moved = true;
+    if (moved) e.preventDefault();
+    el.scrollLeft = startScroll - dx;
+  });
+  // Prevent an accidental click firing on children right after a drag.
+  el.addEventListener('click', (e)=>{ if (moved) { e.preventDefault(); e.stopPropagation(); } }, true);
+  el.addEventListener('wheel', (e)=>{
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)){
+      el.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, { passive: false });
+}
+document.querySelectorAll(
+  '.cat-scroll, .hero-scroll, .brief-scroll, .podcast-scroll, .grid-scroll, .cd-tabs, .tx-tabs, .eq-tabs, .eq-ranges'
+).forEach(makeHorizontallyScrollable);
 </script>
 </body>
 </html>
