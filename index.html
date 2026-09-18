@@ -524,6 +524,7 @@
   .allm-icon-action:hover{color:#e5e7eb;}
   .allm-icon-action.done{color:var(--accent);}
   .allm-msg.prompt{align-self:flex-start;background:var(--surface);border:1px solid rgba(16,185,129,.35);color:#e5e7eb;border-bottom-left-radius:4px;}
+  .allm-msg.suggestion{align-self:flex-start;background:var(--surface);border:1px solid rgba(16,185,129,.35);color:#e5e7eb;border-bottom-left-radius:4px;}
   .allm-msg-tag{display:flex;align-items:center;gap:5px;font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:5px;}
   .allm-quote{display:flex;align-items:flex-start;gap:8px;margin-top:8px;}
   .allm-quote-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;font-weight:500;opacity:.85;flex:1;min-width:0;}
@@ -539,6 +540,10 @@
   .allm-empty-sub{font-size:12px;font-weight:600;line-height:1.5;max-width:220px;}
   .allm-footer{flex-shrink:0;border-top:1px solid var(--border);padding:0.9rem 1.5rem 1.1rem;}
   .allm-chip-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
+  .allm-suggestion{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:14px;padding:9px 10px;margin-bottom:10px;}
+  .allm-suggestion-dismiss{flex-shrink:0;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.08);border:none;color:#9ca3af;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+  .allm-suggestion-text{flex:1;min-width:0;font-size:12px;font-weight:600;color:#e5e7eb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .allm-suggestion-send{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#000;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;}
   .allm-chip{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#9ca3af;background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:6px 11px;font-family:inherit;cursor:pointer;white-space:nowrap;}
   .allm-chip.selected{color:var(--accent);border-color:rgba(16,185,129,.35);background:var(--accent-soft);}
   .allm-chip-dot{width:6px;height:6px;border-radius:50%;background:#6b7280;flex-shrink:0;}
@@ -674,6 +679,15 @@
         <button class="allm-chip" id="allmSelectedChip">
           <span class="allm-chip-dot"></span>
           <span id="allmSelectedChipLabel">Nothing Selected</span>
+        </button>
+      </div>
+      <div class="allm-suggestion" id="allmSuggestion" style="display:none;">
+        <button class="allm-suggestion-dismiss" id="allmSuggestionDismiss" aria-label="Dismiss suggestion">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+        <span class="allm-suggestion-text" id="allmSuggestionText"></span>
+        <button class="allm-suggestion-send" id="allmSuggestionSend" aria-label="Send suggestion">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="6 11 12 5 18 11"></polyline></svg>
         </button>
       </div>
       <div class="allm-input-row">
@@ -1605,6 +1619,11 @@ const ALLM_LIBRARY_GENERIC = [
   ]}
 ];
 
+/* Declared early (rather than down with PAGES/BRAND_COLORS) because
+   getAllmLibrary() below reads it, and that can run during initial page
+   load — before this script reaches the PAGES section further down. */
+let currentPageKey = 'feed';
+
 /* Branch-specific skill sets. Each key matches a PAGES/BRAND_COLORS key.
    Branches not listed here fall back to ALLM_LIBRARY_GENERIC. */
 const BRANCH_SKILLS = {
@@ -1655,6 +1674,8 @@ let allmMessages = [];
 let capturedSelectionText = '';
 let allmPastedText = '';
 let allmInstructionIsSkill = false;
+let allmLastUsedPrompt = null;
+let allmSuggestionDismissed = false;
 
 document.addEventListener('selectionchange', () => {
   const sel = (window.getSelection() ? window.getSelection().toString() : '').trim();
@@ -1674,6 +1695,7 @@ function openALLM(){
   if (currentPageKey !== allmLastOpenedBranch){
     allmOpenGroup = null;
     allmLastOpenedBranch = currentPageKey;
+    allmSuggestionDismissed = false;
   }
   if (capturedSelectionText){
     const wordCount = capturedSelectionText.trim().split(/\s+/).filter(Boolean).length;
@@ -1682,7 +1704,68 @@ function openALLM(){
   }
   renderAllmTabs();
   renderAllmBody();
+  renderAllmSuggestion();
 }
+
+/* Suggests one prompt above the input. Once a prompt/skill has been sent
+   this session, the suggestion should relate to it — same category — but
+   not repeat it verbatim, so it reads as a sensible follow-up rather than
+   the exact thing just used. Before anything's been sent, it falls back to
+   the top prompt from the current branch's Skills Library, so it's still
+   relevant to wherever ALLM was opened from. */
+function findAllmPromptGroup(promptText){
+  const library = getAllmLibrary();
+  for (const group of library){
+    const idx = group.prompts.indexOf(promptText);
+    if (idx !== -1) return { group, idx };
+  }
+  return null;
+}
+
+function getAllmSuggestedPrompt(){
+  const library = getAllmLibrary();
+  if (allmLastUsedPrompt){
+    const found = findAllmPromptGroup(allmLastUsedPrompt);
+    if (found && found.group.prompts.length > 1){
+      // A different prompt from the same category — related, not identical.
+      const nextIdx = (found.idx + 1) % found.group.prompts.length;
+      return found.group.prompts[nextIdx];
+    }
+    // Last prompt wasn't from the library (typed manually) or its category
+    // has nothing else to offer — fall back to another category's lead
+    // prompt so it's still fresh rather than repeating the same text.
+    for (const group of library){
+      if (group.prompts[0] !== allmLastUsedPrompt) return group.prompts[0];
+    }
+    return null;
+  }
+  if (library && library[0] && library[0].prompts && library[0].prompts[0]){
+    return library[0].prompts[0];
+  }
+  return null;
+}
+
+function renderAllmSuggestion(){
+  const bar = document.getElementById('allmSuggestion');
+  const input = document.getElementById('allmInput');
+  const suggestion = allmSuggestionDismissed ? null : getAllmSuggestedPrompt();
+  if (!suggestion || (input && input.value.trim().length > 0)){
+    bar.style.display = 'none';
+    return;
+  }
+  document.getElementById('allmSuggestionText').textContent = suggestion;
+  bar.style.display = 'flex';
+}
+
+document.getElementById('allmSuggestionDismiss').addEventListener('click', ()=>{
+  allmSuggestionDismissed = true;
+  renderAllmSuggestion();
+});
+document.getElementById('allmSuggestionSend').addEventListener('click', ()=>{
+  const suggestion = getAllmSuggestedPrompt();
+  if (!suggestion) return;
+  sendAllmPrompt(suggestion, { fromSuggestion: true });
+});
 
 function closeALLM(){
   document.getElementById('allmScrim').classList.remove('open');
@@ -1744,13 +1827,18 @@ function renderAllmBody(){
       body.innerHTML = `<div class="allm-msgs">
         ${allmMessages.map((m, i) => {
           if (m.role === 'prompt'){
-            const tag = `<div class="allm-msg-tag">${ICONS.checkCircle}Prompt</div>`;
+            const tagLabel = m.fromSkill ? 'Skill' : 'Prompt';
+            const tag = `<div class="allm-msg-tag">${ICONS.checkCircle}${tagLabel}</div>`;
             const quoteHtml = m.quote ? `
               <div class="allm-quote" id="allmQuote${i}">
                 <div class="allm-quote-text">${m.quote}</div>
                 <button class="allm-quote-toggle" data-quotetoggle="allmQuote${i}" aria-label="Show more">${chevronDown}</button>
               </div>` : '';
             return `<div class="allm-msg prompt">${tag}${m.text}${quoteHtml}</div>`;
+          }
+          if (m.role === 'suggestion'){
+            const tag = `<div class="allm-msg-tag">${ICONS.checkCircle}Suggestion</div>`;
+            return `<div class="allm-msg suggestion">${tag}${m.text}</div>`;
           }
           if (m.role === 'user' && m.hasQuote){
             return `<div class="allm-msg user quoted">
@@ -1911,15 +1999,73 @@ function splitAllmComposedText(raw){
 }
 
 /* Prototype-only: produces a plausible-looking canned answer keyed off
-   keywords in the instruction/prompt, so the demo shows something
-   concrete under each message rather than one generic line. Not real
-   model output. */
-function generateAllmFakeAnswer(promptText){
+   keywords in the instruction/prompt. Where a pasted/quoted sourceText is
+   available, it grounds the answer in that actual text (naive sentence
+   extraction) instead of a hardcoded example — so summarising an inflation
+   article talks about inflation, not always Brent crude. Desk-specific
+   buckets (blotter, ticket, sizing, carry) stay hardcoded since those are
+   meant to simulate live trading data, not text about the pasted content.
+   Still not real model output. */
+function extractAllmSentences(text){
+  if (!text) return [];
+  const matches = text.match(/[^.!?]+[.!?]+(\s|$)/g);
+  return (matches || [text]).map(s => s.trim()).filter(Boolean);
+}
+
+/* Lightly reword a sentence so a generated answer doesn't read as a
+   verbatim copy of the pasted text — simple phrase swaps only, not real
+   paraphrasing. */
+function lightAllmParaphrase(text){
+  if (!text) return text;
+  const swaps = [
+    [/\bis expected to\b/gi, 'looks set to'],
+    [/\bare expected to\b/gi, 'look set to'],
+    [/\breveals\b/gi, 'shows'],
+    [/\baccording to\b/gi, 'per'],
+    [/\bsignificant\b/gi, 'notable'],
+    [/\bhighlights\b/gi, 'points to'],
+    [/\bindicates\b/gi, 'suggests'],
+    [/\breigniting\b/gi, 'reviving'],
+    [/\bwarned\b/gi, 'flagged'],
+  ];
+  return swaps.reduce((out, [pattern, replacement]) => out.replace(pattern, replacement), text);
+}
+
+/* Picks up an explicit count in the prompt ("three key points", "top 5
+   takeaways") so a numbered breakdown respects what was actually asked. */
+function extractAllmRequestedCount(promptText, fallback){
+  const digitMatch = (promptText || '').match(/\b(\d+)\b/);
+  if (digitMatch) return parseInt(digitMatch[1], 10);
+  const wordNums = { one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8 };
+  for (const word of Object.keys(wordNums)){
+    if (new RegExp(`\\b${word}\\b`, 'i').test(promptText || '')) return wordNums[word];
+  }
+  return fallback;
+}
+
+function generateAllmFakeAnswer(promptText, sourceText){
   const t = (promptText || '').toLowerCase();
+  const sentences = extractAllmSentences(sourceText);
+  const firstSentence = sentences[0] || (sourceText ? sourceText.trim() : '');
+  const snippet = firstSentence.length > 90 ? firstSentence.slice(0, 90).trim() + '…' : firstSentence;
+
   if (t.includes('bullet') || t.includes('summar') || t.includes('recap')){
+    if (sentences.length){
+      return sentences.slice(0, Math.min(3, sentences.length)).map(s => `• ${s}`).join('\n');
+    }
     return "• Brent has slipped back to roughly $94/bbl, down from yesterday's $120/bbl peak\n• The pullback tracks rising OPEC+ supply and a softer IEA demand outlook\n• Traders are watching $90 as the next key support level";
   }
+  if (t.includes('key point') || t.includes('main point') || t.includes('break this') || t.includes('break down') || t.includes('breakdown') || t.includes('takeaway') || t.includes('top point')){
+    if (sentences.length){
+      const n = Math.min(extractAllmRequestedCount(t, 3), sentences.length);
+      return sentences.slice(0, n).map((s, i) => `${i + 1}. ${lightAllmParaphrase(s)}`).join('\n');
+    }
+    return "1. Brent has slipped back to roughly $94/bbl from yesterday's $120/bbl peak\n2. The move tracks rising OPEC+ supply\n3. Traders are watching $90 as the next support level";
+  }
   if (t.includes('translate') || t.includes('french') || t.includes('mandarin') || t.includes('localis')){
+    if (snippet){
+      return `Voici la version traduite :\n\n« ${snippet} »\n\n(Simplified demo translation — not a real localisation.)`;
+    }
     return "Voici la version traduite :\n\n« Le pétrole Brent est retombé à environ 94 $/baril, après un sommet de 120 $/baril hier, sur fond d'offre accrue de l'OPEP+. »";
   }
   if (t.includes('disclaimer') || t.includes('compliance') || t.includes('promissory')){
@@ -1938,28 +2084,62 @@ function generateAllmFakeAnswer(promptText){
     return "Ticket looks broadly fine — one flag: no Stop Loss is set on a position of this size. Consider adding one before confirming.";
   }
   if (t.includes('proofread') || t.includes('grammar') || t.includes('fact-check') || t.includes('fact check')){
+    if (snippet){
+      return `No major grammar issues found in "${snippet}". The wording reads clearly and the figures quoted are internally consistent.`;
+    }
     return "No major grammar issues found. The quoted rate matches the live ticker. One style note: consider shortening the opening sentence for a punchier tone.";
   }
   if (t.includes('shorten') || t.includes('tighten') || t.includes('concise') || t.includes('simplify')){
+    if (sentences.length){
+      return sentences.slice(0, Math.max(1, Math.ceil(sentences.length / 2))).join(' ');
+    }
     return "Brent has fallen to $94/bbl from $120/bbl on rising OPEC+ supply — a sharp reversal from last month's highs.";
+  }
+  if (sentences.length){
+    const leadIns = ["Here's what stands out:", "The key point from this:", "In short:", "Worth flagging:"];
+    const lead = leadIns[Math.abs(hashAllmString(promptText)) % leadIns.length];
+    const picked = sentences.slice(0, Math.min(2, sentences.length)).join(' ');
+    return `${lead} ${lightAllmParaphrase(picked)}`;
   }
   return "Brent has slipped back to roughly $94/bbl from yesterday's $120/bbl peak, as markets digest rising OPEC+ output and a softer demand outlook. Traders are now watching the $90 support level as the next key technical marker.";
 }
 
-function sendAllmPrompt(raw){
-  if (!raw || !raw.trim()) return;
-  const { instruction, content } = splitAllmComposedText(raw.trim());
-  const hasQuote = !!(allmPastedText && content === allmPastedText);
-  if (instruction){
-    allmMessages.push({ role:'prompt', text: instruction, quote: hasQuote ? content : null });
-  } else {
-    allmMessages.push({ role:'user', text: content, hasQuote });
+function hashAllmString(str){
+  let hash = 0;
+  for (let i = 0; i < (str || '').length; i++){
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
   }
-  allmMessages.push({ role:'assistant', text: generateAllmFakeAnswer(instruction || content) });
+  return hash;
+}
+
+function sendAllmPrompt(raw, opts = {}){
+  if (!raw || !raw.trim()) return;
+  const text = raw.trim();
+  if (opts.fromSuggestion){
+    // The suggestion bar sends a bare prompt with no pasted content behind
+    // it, so it renders like the Prompt bubble (tag, dark card) but stays
+    // on the right since it's still something the person just sent.
+    allmMessages.push({ role:'suggestion', text });
+    allmMessages.push({ role:'assistant', text: generateAllmFakeAnswer(text) });
+    allmLastUsedPrompt = text;
+  } else {
+    const { instruction, content } = splitAllmComposedText(text);
+    const hasQuote = !!(allmPastedText && content === allmPastedText);
+    if (instruction){
+      allmMessages.push({ role:'prompt', text: instruction, quote: hasQuote ? content : null, fromSkill: allmInstructionIsSkill });
+    } else {
+      allmMessages.push({ role:'user', text: content, hasQuote });
+    }
+    allmMessages.push({ role:'assistant', text: generateAllmFakeAnswer(instruction || '', hasQuote ? content : null) });
+    allmLastUsedPrompt = instruction || content;
+  }
+  allmSuggestionDismissed = false;
   allmInstructionIsSkill = false;
   activeAllmTab = 'conversation';
   renderAllmTabs();
   renderAllmBody();
+  renderAllmSuggestion();
 }
 
 /* Selecting a skill from the Library never sends immediately — it drops the
@@ -2044,6 +2224,7 @@ function renderAllmInputActions(){
   const input = document.getElementById('allmInput');
   const actions = document.getElementById('allmInputActions');
   const hasText = input.value.trim().length > 0;
+  renderAllmSuggestion();
   if (hasText){
     actions.innerHTML = `
       <button class="allm-send-btn" id="allmSendBtn" aria-label="Send">
@@ -3234,8 +3415,6 @@ const PAGES = {
   eq:   { el: 'eqMain', sub: 'Equities', cats: EQ_CATEGORIES },
   tx:   { el: 'txMain', sub: 'TX', cats: [] }
 };
-
-let currentPageKey = 'feed';
 
 const BRAND_COLORS = {
   feed: { bg:'#10b981', glow:'16,185,129'  },
